@@ -1,7 +1,7 @@
 .{
     .name = .zstd,
     .version = "1.5.7",
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.1",
     .dependencies = .{
         .zstd = .{
             .url = "git+https://github.com/facebook/zstd.git?ref=v1.5.7#f8745da6ff1ad1e7bab384bd1f9d742439278e99",
@@ -14,6 +14,7 @@
         "LICENSE",
         "LICENSE-ZSTD",
         "README.md",
+        "src",
     },
     .fingerprint = 0x72fd505e902d4228, // Changing this has security and trust implications.
 }

@@ -43,17 +43,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(zstd);
+
     zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = common_sources });
     // zstd does not install into its own subdirectory. :(
     zstd.installHeader(upstream.path("lib/zstd.h"), "zstd.h");
     zstd.installHeader(upstream.path("lib/zdict.h"), "zdict.h");
     zstd.installHeader(upstream.path("lib/zstd_errors.h"), "zstd_errors.h");
-    if (compression) zstd.addCSourceFiles(.{ .root = upstream.path("lib"), .files = compression_sources });
-    if (decompression) zstd.addCSourceFiles(.{ .root = upstream.path("lib"), .files = decompress_sources });
-    if (dictbuilder) zstd.addCSourceFiles(.{ .root = upstream.path("lib"), .files = dict_builder_sources });
-    if (deprecated) zstd.addCSourceFiles(.{ .root = upstream.path("lib"), .files = deprecated_sources });
+    if (compression) zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = compression_sources });
+    if (decompression) zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = decompress_sources });
+    if (dictbuilder) zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = dict_builder_sources });
+    if (deprecated) zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = deprecated_sources });
     if (legacy_support != 0) {
-        for (legacy_support..8) |i| zstd.addCSourceFile(.{ .file = upstream.path(b.fmt("lib/legacy/zstd_v0{d}.c", .{i})) });
+        for (legacy_support..8) |i| zstd.root_module.addCSourceFile(.{ .file = upstream.path(b.fmt("lib/legacy/zstd_v0{d}.c", .{i})) });
     }
 
     if (target.result.cpu.arch == .x86_64) {
@@ -89,6 +90,28 @@ pub fn build(b: *std.Build) void {
         zstd.root_module.addCMacro("ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR", "");
     }
 
+    // Expose our Zig bindings which link to our library. Presumably static.
+    const mod = b.addModule("zstd", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .pic = pic,
+        .link_libc = true,
+        .strip = strip,
+    });
+
+    mod.link_libc = true;
+    mod.addIncludePath(upstream.path("lib"));
+    mod.linkLibrary(zstd);
+
+    const mod_tests = b.addTest(.{
+        .root_module = mod,
+    });
+    const run_mod_tests = b.addRunArtifact(mod_tests);
+
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&run_mod_tests.step);
+
     {
         const examples: []const []const u8 = &.{
             "simple_compression",
@@ -113,7 +136,9 @@ pub fn build(b: *std.Build) void {
             exe.addCSourceFile(.{ .file = upstream.path(b.fmt("examples/{s}.c", .{name})) });
             exe.addIncludePath(upstream.path("examples/common.c"));
             exe.linkLibrary(zstd);
-            b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "examples" } } }).step);
+            b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{
+                .dest_dir = .{ .override = .{ .custom = "examples" } },
+            }).step);
         }
     }
 }
