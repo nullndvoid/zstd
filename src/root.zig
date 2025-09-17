@@ -1,5 +1,7 @@
 const std = @import("std");
-const c = @cImport({
+/// For all use-cases not supported by these bindings, use this as a stop-gap
+/// and feel free to contribute upstream.
+pub const c = @cImport({
     @cInclude("zstd.h");
 });
 
