@@ -133,11 +133,16 @@ pub const Diagnostics = struct {
             s.fn_name,
         });
 
-        try writer.print("\t\"{s}\"", .{self.errstr});
+        try writer.print("\t\"{s}\"", .{
+            // Should prevent printing garbage.
+            std.mem.span(self.errstr),
+        });
     }
 
     /// Sets the diagnostics with an error string and source info.
     pub inline fn set(self: *Diagnostics, errstr: [:0]const u8) void {
+        // To prevent garbage piling up.
+        @memset(&self.errstr, 0);
         @memcpy(&self.errstr, errstr.ptr);
         self.source_info = @src();
         self.was_set = true;
