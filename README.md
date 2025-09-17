@@ -4,6 +4,21 @@
 
 This is [zstd](https://github.com/facebook/zstd), packaged for [Zig](https://ziglang.org/).
 
+## Zig Bindings
+
+[@nullndvoid](https://github.com/nullndvoid/zstd) took the liberty to write some very simple (compression and decompression w/o context types etc.) Zig FFI bindings for this static library.
+To use them, first update your `build.zig.zon` as below in [installation](#installation), then add this to your `build.zig`:
+
+```zig
+const zstd = b.dependency("zstd", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("zstd", zstd.module("zstd"));
+```
+
+This should do the job of compiling and statically linking `zstd` but if not, add the line containing `linkLibrary` as below.
+
 ## Installation
 
 First, update your `build.zig.zon`:
