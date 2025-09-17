@@ -44,9 +44,12 @@ pub const ZstdError = error{
     MaxCode,
 };
 
+/// Not being defined by translate-c.
+extern fn ZSTD_getErrorCode(code: usize) c.ZSTD_ErrorCode;
+
 /// Called to convert our C error codes to Zig equivalents.
-fn toError(self: c.ZSTD_ErrorCode) ZstdError {
-    return switch (self) {
+fn toError(err: c.ZSTD_ErrorCode) ZstdError {
+    return switch (err) {
         c.ZSTD_error_no_error => ZstdError.NoError,
         c.ZSTD_error_GENERIC => ZstdError.Generic,
         c.ZSTD_error_prefix_unknown => ZstdError.PrefixUnknown,
@@ -100,15 +103,15 @@ pub const Diagnostics = struct {
 
     pub fn init() Diagnostics {
         return Diagnostics{
-            .errstr = [_]u8{0 ** MAX_ERRSTR_LENGTH},
+            .errstr = [_:0]u8{0} ** MAX_ERRSTR_LENGTH,
             .source_info = .{
                 .line = 0,
                 .column = 0,
                 .file = "",
                 .fn_name = "",
                 .module = "",
-                .was_set = false,
             },
+            .was_set = false,
         };
     }
 
@@ -179,16 +182,32 @@ pub const Frame = struct {
         };
     }
 
+    /// Currently this is defined as 18, but just to accommodate future
+    /// changes, this will be set to 36.
+    const MAX_FRAME_HEADER_SIZE = 18 * 2;
+
     // /// Assumes our data contains one Frame, this is unchecked by `init`.
     pub fn decompress(self: Frame, alloc: Allocator) ZstdError![]const u8 {
         const bound = c.ZSTD_getFrameContentSize(
             self.data.ptr,
-            c.ZSTD_FRAMEHEADERSIZE_MAX,
+            self.data.len,
         );
+
+        // Handle special return values that are NOT errors but special constants
+        // These are very large numbers that look like errors but aren't
+        if (bound == @as(c_longlong, @bitCast(@as(c_longlong, -1)))) { // ZSTD_CONTENTSIZE_UNKNOWN
+            self.diag.set("Frame content size is unknown, use streaming decompression");
+            return ZstdError.Generic;
+        }
+
+        if (bound == @as(c_longlong, @bitCast(@as(c_longlong, -2)))) { // ZSTD_CONTENTSIZE_ERROR
+            self.diag.set("Input is not a valid zstd frame");
+            return ZstdError.PrefixUnknown;
+        }
 
         if (c.ZSTD_isError(bound) != 0) {
             self.diag.set(getZstdErrStr(bound));
-            return getZstdErrStr(bound);
+            return getZstdErr(bound);
         }
 
         const decompressed = alloc.alloc(u8, bound) catch |err| {
@@ -200,6 +219,7 @@ pub const Frame = struct {
                 else => unreachable,
             }
         };
+        errdefer alloc.free(decompressed);
 
         const bytes = c.ZSTD_decompress(
             decompressed.ptr,
@@ -213,6 +233,8 @@ pub const Frame = struct {
             return getZstdErr(bytes);
         }
 
+        // On success, we should return a slice of the correct size.
+        // The original buffer will be freed by the caller via `alloc.free(data)`.
         return decompressed[0..bytes];
     }
 };
@@ -250,7 +272,6 @@ pub fn compress(
             else => unreachable,
         }
     };
-
     errdefer alloc.free(compressed);
 
     const compressed_size = c.ZSTD_compress(
@@ -266,21 +287,37 @@ pub fn compress(
         return getZstdErr(compressed_size);
     }
 
+    const final_data = alloc.dupe(u8, compressed[0..compressed_size]) catch |err| {
+        switch (err) {
+            error.OutOfMemory => {
+                self.diag.set("Ran out of memory allocating final compressed data buffer.");
+                return ZstdError.MemoryAllocation;
+            },
+            else => unreachable,
+        }
+    };
+
+    alloc.free(compressed);
+
+    // The `compress` function returns a `Frame` that owns the memory.
+    // `errdefer` is incorrect here because we need to transfer ownership on success.
+    // The caller is now responsible for calling `frame.deinit(alloc)`.
     return Frame{
         .allocated = true,
-        .data = compressed,
+        .data = final_data,
         .diag = &self.diag,
     };
 }
 
 inline fn getZstdErr(code: usize) ZstdError {
-    const enum_err = @as(c.ZSTD_ErrorCode, @truncate(code));
+    // Use the correct C API to get the enum from the error code.
+    const err = ZSTD_getErrorCode(code);
 
-    return toError(enum_err);
+    return toError(err);
 }
 
 inline fn getZstdErrStr(code: usize) [:0]const u8 {
-    const c_str = c.ZSTD_getErrorString(@intCast(code));
+    const c_str = c.ZSTD_getErrorName(code);
     return std.mem.span(c_str);
 }
 
@@ -290,6 +327,17 @@ test {
     std.testing.refAllDecls(Self);
 }
 
-test "compress" {
-    // const alloc = std.testing.allocator;
+test "compress and decompress" {
+    const alloc = std.testing.allocator;
+    var zstd = Self.init(Diagnostics.init());
+
+    var frame = zstd.compress(alloc, TEST_DATA, 20) catch |err|
+        std.debug.panic("{any}", .{err});
+    defer frame.deinit(alloc);
+
+    const data = frame.decompress(alloc) catch |err|
+        std.debug.panic("{any}", .{err});
+    defer alloc.free(data);
+
+    try std.testing.expectEqualSlices(u8, TEST_DATA, data);
 }
