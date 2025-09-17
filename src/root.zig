@@ -134,8 +134,7 @@ pub const Diagnostics = struct {
         });
 
         try writer.print("\t\"{s}\"", .{
-            // Should prevent printing garbage.
-            std.mem.span(self.errstr),
+            self.errstr
         });
     }
 
