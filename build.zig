@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const upstream = b.dependency("zstd", .{});
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -42,7 +42,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    b.installArtifact(zstd);
+
+    var install_artifact = b.addInstallArtifact(zstd, .{});
+    b.getInstallStep().dependOn(&install_artifact.step);
 
     zstd.root_module.addCSourceFiles(.{ .root = upstream.path("lib"), .files = common_sources });
     // zstd does not install into its own subdirectory. :(
@@ -106,11 +108,34 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .test_runner = .{
+            .path = b.path("test_runner.zig"),
+            .mode = .simple,
+        },
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+
+    // TODO: Fix this. Build script is a mess lol.
+    // // Create a step to copy the library after it's built
+    // const copy_lib_step = b.addWriteFiles();
+    // copy_lib_step.step.dependOn(&install_artifact.step);
+
+    // // Copy the library to a known location for tests.
+    // const lib_location = copy_lib_step.addCopyFile(zstd.getEmittedBin(), "libzstd.a");
+    // const test_cfg = b.addOptions();
+    // test_cfg.addOption(
+    //     std.Build.Cache.Path,
+    //     "lib_location",
+    //     lib_location.getPath3(b, &copy_lib_step.step),
+    // );
+
+    // // Store the path for tests to use.
+    // mod_tests.root_module.addOptions("test_cfg", test_cfg);
+
+    // test_step.dependOn(&copy_lib_step.step);
 
     {
         const examples: []const []const u8 = &.{

@@ -44,7 +44,7 @@ pub const ZstdError = error{
     SequenceProducerFailed,
     ExternalSequencesInvalid,
     MaxCode,
-};
+} || std.mem.Allocator.Error || std.Io.Reader.Error || std.Io.Writer.Error;
 
 /// Not being defined by translate-c.
 extern fn ZSTD_getErrorCode(code: usize) c.ZSTD_ErrorCode;
@@ -133,9 +133,7 @@ pub const Diagnostics = struct {
             s.fn_name,
         });
 
-        try writer.print("\t\"{s}\"", .{
-            self.errstr
-        });
+        try writer.print("\t\"{s}\"", .{self.errstr});
     }
 
     /// Sets the diagnostics with an error string and source info.
@@ -220,7 +218,7 @@ pub const Frame = struct {
             switch (err) {
                 error.OutOfMemory => {
                     self.diag.set("Ran out of memory allocating decompressed data buffer.");
-                    return ZstdError.MemoryAllocation;
+                    return err;
                 },
                 else => unreachable,
             }
@@ -273,7 +271,7 @@ pub fn compress(
         switch (err) {
             error.OutOfMemory => {
                 self.diag.set("Ran out of memory allocating compressed data buffer.");
-                return ZstdError.MemoryAllocation;
+                return err;
             },
             else => unreachable,
         }
@@ -297,7 +295,7 @@ pub fn compress(
         switch (err) {
             error.OutOfMemory => {
                 self.diag.set("Ran out of memory allocating final compressed data buffer.");
-                return ZstdError.MemoryAllocation;
+                return err;
             },
             else => unreachable,
         }
@@ -327,13 +325,207 @@ inline fn getZstdErrStr(code: usize) [:0]const u8 {
     return std.mem.span(c_str);
 }
 
+/// Streaming compression using a `Reader` and `Writer`.
+pub fn compressRW(
+    self: *Self,
+    alloc: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    compression_level: u8,
+) ZstdError!void {
+    if (compression_level == 0 or compression_level > 22) {
+        self.diag.set("Parameter `level` should be between 1 and 22.");
+        return ZstdError.ParameterOutOfBound;
+    }
+
+    const in_buf_size = c.ZSTD_CStreamInSize();
+    const out_buf_size = c.ZSTD_CStreamOutSize();
+
+    const in_buf = try alloc.alloc(u8, in_buf_size);
+    defer alloc.free(in_buf);
+
+    const out_buf = try alloc.alloc(u8, out_buf_size);
+    defer alloc.free(out_buf);
+
+    const cstream = c.ZSTD_createCStream() orelse {
+        self.diag.set("Failed to create the CStream context.");
+        return ZstdError.Generic;
+    };
+    defer _ = c.ZSTD_freeCStream(cstream);
+
+    const init_result = c.ZSTD_initCStream(cstream, compression_level);
+    if (c.ZSTD_isError(init_result) != 0) {
+        self.diag.set(getZstdErrStr(init_result));
+        return getZstdErr(init_result);
+    }
+
+    var finished = false;
+    while (!finished) {
+        // 1. Read a chunk of data from the reader.
+        const bytes_read = reader.readSliceShort(in_buf) catch |err| {
+            self.diag.set("Failed to read from reader!");
+            return err;
+        };
+
+        // If we read 0 bytes, it's the end of the input stream.
+        const at_end_of_input = (bytes_read == 0);
+
+        var input = c.ZSTD_inBuffer{
+            .src = in_buf.ptr,
+            .size = bytes_read,
+            .pos = 0,
+        };
+
+        // 2. Loop to process the input, flushing output as we go.
+        // This loop continues until Zstd signals the frame is fully flushed.
+        var stream_is_finished = false;
+        while (!stream_is_finished) {
+            var output = c.ZSTD_outBuffer{
+                .dst = out_buf.ptr,
+                .size = out_buf.len,
+                .pos = 0,
+            };
+
+            // 3. Determine the end operation for this call.
+            // If we are at the end of our input, we tell Zstd to end the frame.
+            // Otherwise, we tell it to continue.
+            const end_op = if (at_end_of_input) c.ZSTD_e_end else c.ZSTD_e_continue;
+
+            // 4. Use the modern ZSTD_compressStream2 API
+            const remaining_bytes_hint = c.ZSTD_compressStream2(
+                cstream,
+                &output,
+                &input,
+                @intCast(end_op),
+            );
+            if (c.ZSTD_isError(remaining_bytes_hint) != 0) {
+                self.diag.set(getZstdErrStr(remaining_bytes_hint));
+                return getZstdErr(remaining_bytes_hint);
+            }
+
+            // Write whatever output was produced.
+            if (output.pos > 0) {
+                try writer.writeAll(out_buf[0..output.pos]);
+            }
+
+            // Check if we are done.
+            if (at_end_of_input) {
+                // If we told Zstd to end the stream, it's finished when it returns 0.
+                if (remaining_bytes_hint == 0) {
+                    stream_is_finished = true;
+                }
+            } else {
+                // If we are not at the end, we are done with this chunk when Zstd
+                // has consumed all of it.
+                if (input.pos >= input.size) {
+                    stream_is_finished = true;
+                }
+            }
+        }
+
+        if (at_end_of_input) {
+            finished = true;
+        }
+    }
+
+    try writer.flush();
+}
+
+pub fn decompressRW(
+    self: *Self,
+    alloc: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+) ZstdError!void {
+    // --- Setup is the same as before ---
+    const in_buf_size = c.ZSTD_DStreamInSize();
+    const out_buf_size = c.ZSTD_DStreamOutSize();
+
+    const in_buf = try alloc.alloc(u8, in_buf_size);
+    defer alloc.free(in_buf);
+
+    const out_buf = try alloc.alloc(u8, out_buf_size);
+    defer alloc.free(out_buf);
+
+    const dstream = c.ZSTD_createDStream() orelse {
+        self.diag.set("Failed to create the DStream context.");
+        return ZstdError.Generic;
+    };
+    defer _ = c.ZSTD_freeDStream(dstream);
+
+    const init_result = c.ZSTD_initDStream(dstream);
+    if (c.ZSTD_isError(init_result) != 0) {
+        self.diag.set(getZstdErrStr(init_result));
+        return getZstdErr(init_result);
+    }
+
+    // --- Corrected Single-Loop Logic ---
+    var frame_is_complete = false;
+    while (true) {
+        // 1. Read a chunk of compressed data.
+        const bytes_read = reader.readSliceShort(in_buf) catch |err| {
+            self.diag.set("Failed to read from reader!");
+            return err;
+        };
+
+        // If the reader is empty, we break the reading loop.
+        // We'll check later if the frame was completed.
+        if (bytes_read == 0) {
+            break;
+        }
+
+        var input = c.ZSTD_inBuffer{
+            .src = in_buf.ptr,
+            .size = bytes_read,
+            .pos = 0,
+        };
+
+        // 2. Process the entire input chunk.
+        while (input.pos < input.size) {
+            var output = c.ZSTD_outBuffer{
+                .dst = out_buf.ptr,
+                .size = out_buf.len,
+                .pos = 0,
+            };
+
+            const result = c.ZSTD_decompressStream(dstream, &output, &input);
+            if (c.ZSTD_isError(result) != 0) {
+                self.diag.set(getZstdErrStr(result));
+                return getZstdErr(result);
+            }
+
+            // Write the decompressed data.
+            try writer.writeAll(out_buf[0..output.pos]);
+
+            // 3. Check for end of frame. This is the crucial exit condition.
+            if (result == 0) {
+                frame_is_complete = true;
+                break; // Exit the inner while loop
+            }
+        }
+
+        if (frame_is_complete) {
+            break; // Exit the outer while loop
+        }
+    }
+
+    // 4. After the loop, verify the frame was actually completed.
+    // If not, the input stream was truncated.
+    if (!frame_is_complete) {
+        self.diag.set("Input stream is truncated or corrupt (frame never completed).");
+        return ZstdError.CorruptionDetected;
+    }
+
+    try writer.flush();
+}
+
 const TEST_DATA = @embedFile("root.zig");
 
-test {
+test "refAllDecls" {
     std.testing.refAllDecls(Self);
 }
 
-test "compress and decompress" {
+test "compress + decompress (end to end)" {
     const alloc = std.testing.allocator;
     var zstd = Self.init(Diagnostics.init());
 
@@ -346,4 +538,36 @@ test "compress and decompress" {
     defer alloc.free(data);
 
     try std.testing.expectEqualSlices(u8, TEST_DATA, data);
+}
+
+test "compressRW + decompressRW (end to end)" {
+    const alloc = std.testing.allocator;
+
+    const this_file = @embedFile("root.zig");
+
+    var reader = std.Io.Reader.fixed(this_file);
+    var writer = std.Io.Writer.Allocating.init(alloc);
+    defer writer.deinit();
+
+    var self = Self.init(Diagnostics.init());
+
+    try self.compressRW(alloc, &reader, &writer.writer, 20);
+
+    const data = try writer.toOwnedSlice();
+    defer alloc.free(data);
+
+    try std.testing.expect(data.len <= this_file.len);
+    try std.testing.expect(data.len != 0);
+
+    // Now decompress.
+    var compressed_reader = std.Io.Reader.fixed(data);
+    var decompressed_writer = std.Io.Writer.Allocating.init(alloc);
+    defer decompressed_writer.deinit();
+
+    try self.decompressRW(alloc, &compressed_reader, &decompressed_writer.writer);
+
+    const decompressed = try decompressed_writer.toOwnedSlice();
+    defer alloc.free(decompressed);
+
+    try std.testing.expectEqualSlices(u8, this_file, decompressed);
 }
