@@ -189,13 +189,3 @@ const deprecated_sources: []const []const u8 = &.{
     "deprecated/zbuff_common.c",
     "deprecated/zbuff_compress.c",
 };
-
-const legacy_sources: []const []const u8 = &.{
-    "legacy/zstd_v01.c",
-    "legacy/zstd_v02.c",
-    "legacy/zstd_v03.c",
-    "legacy/zstd_v04.c",
-    "legacy/zstd_v05.c",
-    "legacy/zstd_v06.c",
-    "legacy/zstd_v07.c",
-};
