@@ -5,6 +5,9 @@ pub const c = @cImport({
     @cInclude("zstd.h");
 });
 
+/// Prefer using this as our type e.g. zstd.Zstd to avoid name collisions.
+pub const Zstd = @This();
+
 const Allocator = std.mem.Allocator;
 
 pub const ZstdError = error{
