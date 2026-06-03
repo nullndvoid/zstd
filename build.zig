@@ -103,8 +103,15 @@ pub fn build(b: *std.Build) !void {
     });
 
     mod.link_libc = true;
-    mod.addIncludePath(upstream.path("lib"));
     mod.linkLibrary(zstd);
+
+    const translate_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    translate_c.addIncludePath(upstream.path("lib"));
+    mod.addImport("c", translate_c.createModule());
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
@@ -158,9 +165,9 @@ pub fn build(b: *std.Build) !void {
                     .optimize = optimize,
                 }),
             });
-            exe.addCSourceFile(.{ .file = upstream.path(b.fmt("examples/{s}.c", .{name})) });
-            exe.addIncludePath(upstream.path("examples/common.c"));
-            exe.linkLibrary(zstd);
+            exe.root_module.addCSourceFile(.{ .file = upstream.path(b.fmt("examples/{s}.c", .{name})) });
+            exe.root_module.addIncludePath(upstream.path("examples/common.c"));
+            exe.root_module.linkLibrary(zstd);
             b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{
                 .dest_dir = .{ .override = .{ .custom = "examples" } },
             }).step);

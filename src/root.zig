@@ -1,9 +1,7 @@
 const std = @import("std");
 /// For all use-cases not supported by these bindings, use this as a stop-gap
 /// and feel free to contribute upstream.
-pub const c = @cImport({
-    @cInclude("zstd.h");
-});
+pub const c = @import("c");
 
 /// Prefer using this as our type e.g. zstd.Zstd to avoid name collisions.
 pub const Zstd = @This();
